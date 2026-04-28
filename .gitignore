@@ -1,0 +1,23 @@
+# Pre-publication data protection: never commit empirical results or input data
+params/20260426_empirical_targets.tsv
+params/20260426_per_gene_sites.tsv
+params/source/
+calibration/
+logs/
+sweeps/
+verification/
+*.csv
+*.fasta
+*.fa
+*.vcf
+*.bam
+*.bai
+
+# Calibration outputs
+calibrated_mu.tsv
+*.log
+
+# OS / editor
+.DS_Store
+*.swp
+*~

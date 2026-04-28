@@ -1,0 +1,257 @@
+// =============================================================================
+// MU CALIBRATION -- NEUTRAL MODEL, getorg n=70 scaffold (15,135 sites)
+// =============================================================================
+//
+// Adaptive convergence: runs until pi stabilizes within TOLERANCE of TARGET_PI
+// for WINDOW consecutive checks, or until MAX_TICK is reached. Reports a
+// final ratio (window_mean / TARGET_PI) which the outer-loop wrapper uses
+// to adjust MU for the next iteration.
+//
+// All physical parameters required via -d flags. No silent defaults on
+// biology / scaffold / target.
+//
+// Usage:
+//   slim -d K_NURSES=10000 -d MU=6.5e-7 -d OOZ_SURVIVAL=0.50 \
+//        -d NURSE_MORTALITY=0.15 -d COMBO_ID=5 -d TARGET_PI=0.006548 \
+//        -d GENOME_LENGTH=15135 -d PHOROS_PER_NURSE=10 \
+//        -d GONOS_PER_PHORO=5 -d EGGS_PER_GONO=5 -d SELFING_RATE=0.5 \
+//        -d "LOGDIR='/scratch/eeg37520/doliolid_slim_rebuild/calibration'" \
+//        20260426_neutral_calibration_15k.slim
+//
+// Note on SELFING_RATE: accepted for parameter-symmetry with future selection
+// scripts. mtDNA inheritance is matrilineal in this model (egg donor only),
+// so the value is not used in the reproduction callback.
+//
+// Emily Gipson, UGA mfflab
+// Created: 2026-04-26
+// =============================================================================
+
+initialize() {
+    initializeSLiMModelType("nonWF");
+
+    // Required physical parameters -- stop() if missing
+    if (!exists("K_NURSES")) stop("K_NURSES required (-d K_NURSES=...)");
+    if (!exists("MU")) stop("MU required (-d MU=...)");
+    if (!exists("OOZ_SURVIVAL")) stop("OOZ_SURVIVAL required");
+    if (!exists("NURSE_MORTALITY")) stop("NURSE_MORTALITY required");
+    if (!exists("COMBO_ID")) stop("COMBO_ID required");
+    if (!exists("TARGET_PI")) stop("TARGET_PI required");
+    if (!exists("GENOME_LENGTH")) stop("GENOME_LENGTH required");
+    if (!exists("PHOROS_PER_NURSE")) stop("PHOROS_PER_NURSE required");
+    if (!exists("GONOS_PER_PHORO")) stop("GONOS_PER_PHORO required");
+    if (!exists("EGGS_PER_GONO")) stop("EGGS_PER_GONO required");
+    if (!exists("SELFING_RATE")) stop("SELFING_RATE required");
+    if (!exists("LOGDIR")) stop("LOGDIR required");
+
+    // Convergence-loop parameters with defaults
+    if (!exists("TOLERANCE")) defineConstant("TOLERANCE", 0.15);
+    if (!exists("WINDOW")) defineConstant("WINDOW", 10);
+    if (!exists("CHECK_INTERVAL")) defineConstant("CHECK_INTERVAL", 500);
+    if (!exists("CHECK_START")) defineConstant("CHECK_START", 5000);
+    if (!exists("MAX_TICK")) defineConstant("MAX_TICK", 200000);
+
+    // Genetic setup -- neutral, non-recombining, haploid
+    initializeMutationType("m1", 0.5, "f", 0.0);
+    m1.mutationStackPolicy = "l";
+    m1.convertToSubstitution = F;
+
+    initializeGenomicElementType("g1", m1, 1.0);
+    initializeChromosome(1, GENOME_LENGTH, type="H");
+    initializeGenomicElement(g1);
+    initializeMutationRate(MU);
+    initializeRecombinationRate(0.0);
+
+    defineConstant("LOGFILE", LOGDIR + "/calibration_combo" + COMBO_ID +
+        "_K" + K_NURSES + "_mu" + MU +
+        "_ooz" + asInteger(OOZ_SURVIVAL * 100) +
+        "_mort" + asInteger(NURSE_MORTALITY * 100) + ".csv");
+
+    catn("=== NEUTRAL CALIBRATION (getorg n=70, 15,135 sites) ===");
+    catn("  COMBO_ID:         " + COMBO_ID);
+    catn("  K_NURSES:         " + K_NURSES);
+    catn("  OOZ_SURVIVAL:     " + OOZ_SURVIVAL);
+    catn("  NURSE_MORTALITY:  " + NURSE_MORTALITY);
+    catn("  MU:               " + MU);
+    catn("  GENOME_LENGTH:    " + GENOME_LENGTH);
+    catn("  PHOROS_PER_NURSE: " + PHOROS_PER_NURSE);
+    catn("  GONOS_PER_PHORO:  " + GONOS_PER_PHORO);
+    catn("  EGGS_PER_GONO:    " + EGGS_PER_GONO);
+    catn("  SELFING_RATE:     " + SELFING_RATE + " (matrilineal mtDNA, unused)");
+    catn("  TARGET_PI:        " + TARGET_PI);
+    catn("  TOLERANCE:        " + TOLERANCE);
+    catn("  WINDOW:           " + WINDOW);
+    catn("  MAX_TICK:         " + MAX_TICK);
+    catn("  LOGFILE:          " + LOGFILE);
+    catn("=========================================================");
+}
+
+// Reproduction: nurse -> phoros -> gonos -> oozooids
+reproduction() {
+    if (individual.tag == 1) {
+        for (i in seqLen(PHOROS_PER_NURSE)) {
+            offspring = subpop.addCloned(individual);
+            if (!isNULL(offspring)) offspring.tag = 2;
+        }
+    }
+    if (individual.tag == 2) {
+        for (i in seqLen(GONOS_PER_PHORO)) {
+            offspring = subpop.addCloned(individual);
+            if (!isNULL(offspring)) offspring.tag = 3;
+        }
+    }
+    if (individual.tag == 3) {
+        // mtDNA from egg donor only (matrilineal). EGGS_PER_GONO offspring per gono.
+        motherHap = individual.haplosomesNonNull;
+        for (i in seqLen(EGGS_PER_GONO)) {
+            offspring = subpop.addRecombinant(motherHap, NULL, integer(0),
+                NULL, NULL, NULL);
+            if (!isNULL(offspring)) offspring.tag = 0;
+        }
+    }
+}
+
+// First tick: seed K_NURSES/10 nurses, set up convergence window
+1 early() {
+    sim.addSubpop("p1", asInteger(K_NURSES / 10));
+    p1.individuals.tag = 1;
+
+    defineGlobal("PI_WINDOW", rep(0.0, WINDOW));
+    defineGlobal("WINDOW_FILLED", 0);
+
+    log = community.createLogFile(LOGFILE, logInterval=100);
+    log.addCycle();
+    log.addCustomColumn("num_nurses", "sum(p1.individuals.tag == 1);");
+    log.addCustomColumn("total_N", "p1.individualCount;");
+    log.addCustomColumn("pi", "calcNucDivSub();");
+}
+
+// Stage transitions and mortality
+early() {
+    if (community.tick == 1) return;
+
+    inds = p1.individuals;
+    if (size(inds) == 0) {
+        catn("EXTINCT at tick " + community.tick);
+        community.simulationFinished();
+        return;
+    }
+
+    // Oozooid maturation: roll OOZ_SURVIVAL, capped by available nurse slots
+    oozooids = inds[(inds.tag == 0) & (inds.age >= 1)];
+    if (size(oozooids) > 0) {
+        currentNurses = p1.individuals[p1.individuals.tag == 1];
+        nurseSlots = K_NURSES - size(currentNurses);
+        oozooids = sample(oozooids, size(oozooids));
+        matured = 0;
+        for (ooz in oozooids) {
+            if (runif(1) < OOZ_SURVIVAL & matured < nurseSlots) {
+                ooz.tag = 1;
+                matured = matured + 1;
+            } else {
+                ooz.fitnessScaling = 0.0;
+            }
+        }
+    }
+
+    // Nurse mortality (at least 1 if any present)
+    currentNurses = p1.individuals[p1.individuals.tag == 1];
+    if (size(currentNurses) > 0) {
+        nToKill = asInteger(max(1.0, ceil(size(currentNurses) * NURSE_MORTALITY)));
+        if (nToKill > size(currentNurses)) nToKill = size(currentNurses);
+        deadNurses = sample(currentNurses, nToKill);
+        deadNurses.fitnessScaling = 0.0;
+    }
+
+    // Phoros and gonos die after their one-tick reproductive bout
+    oldPhoros = p1.individuals[(p1.individuals.tag == 2) & (p1.individuals.age >= 1)];
+    if (size(oldPhoros) > 0) oldPhoros.fitnessScaling = 0.0;
+
+    oldGonos = p1.individuals[(p1.individuals.tag == 3) & (p1.individuals.age >= 1)];
+    if (size(oldGonos) > 0) oldGonos.fitnessScaling = 0.0;
+}
+
+// Sampled pi for convergence checking (cap haps at 200 for speed)
+function (float)calcNucDivSub(void) {
+    if (p1.individualCount < 2) return 0.0;
+    haps = p1.individuals.haplosomesNonNull;
+    if (size(haps) < 2) return 0.0;
+    if (size(haps) > 200) {
+        sampledInds = sample(p1.individuals, 200);
+        haps = sampledInds.haplosomesNonNull;
+    }
+    return calcPi(haps);
+}
+
+// Failsafe: should never be reached if convergence checker is correct
+200000 late() {
+    catn("ERROR: Reached terminal event at tick 200000 without normal exit.");
+    community.simulationFinished();
+}
+
+// Convergence checker
+1: late() {
+    if (community.tick < CHECK_START) return;
+    if (community.tick % CHECK_INTERVAL != 0) return;
+
+    pi = calcNucDivSub();
+    nurses = p1.individuals[p1.individuals.tag == 1];
+
+    for (i in 0:(WINDOW - 2)) PI_WINDOW[i] = PI_WINDOW[i + 1];
+    PI_WINDOW[WINDOW - 1] = pi;
+
+    defineGlobal("WINDOW_FILLED", min(WINDOW_FILLED + 1, WINDOW));
+
+    lowBound = TARGET_PI * (1.0 - TOLERANCE);
+    highBound = TARGET_PI * (1.0 + TOLERANCE);
+
+    inRange = 0;
+    if (WINDOW_FILLED == WINDOW) {
+        for (i in 0:(WINDOW - 1)) {
+            if (PI_WINDOW[i] >= lowBound & PI_WINDOW[i] <= highBound)
+                inRange = inRange + 1;
+        }
+    }
+
+    windowMean = 0.0;
+    if (WINDOW_FILLED > 0)
+        windowMean = sum(PI_WINDOW[(WINDOW - WINDOW_FILLED):(WINDOW - 1)]) / WINDOW_FILLED;
+
+    catn("Tick " + community.tick + ": " + size(nurses) + " nurses, pi=" +
+        format("%.6f", pi) + ", window_mean=" + format("%.6f", windowMean) +
+        ", in_range=" + inRange + "/" + WINDOW_FILLED + " [combo " + COMBO_ID + "]");
+
+    if (WINDOW_FILLED == WINDOW & inRange == WINDOW) {
+        catn("\n================================================");
+        catn("  CONVERGED -- COMBO " + COMBO_ID);
+        catn("  Tick:           " + community.tick);
+        catn("  K_NURSES:       " + K_NURSES);
+        catn("  OOZ_SURVIVAL:   " + OOZ_SURVIVAL);
+        catn("  NURSE_MORT:     " + NURSE_MORTALITY);
+        catn("  MU:             " + MU);
+        catn("  Final pi:       " + format("%.6f", pi));
+        catn("  Window mean:    " + format("%.6f", windowMean));
+        catn("  Target pi:      " + TARGET_PI);
+        catn("  Ratio:          " + format("%.4f", windowMean / TARGET_PI));
+        catn("  STATUS:         CONVERGED");
+        catn("================================================");
+        community.simulationFinished();
+        return;
+    }
+
+    if (community.tick >= MAX_TICK) {
+        catn("\n================================================");
+        catn("  MAX_TICK REACHED -- COMBO " + COMBO_ID);
+        catn("  K_NURSES:       " + K_NURSES);
+        catn("  OOZ_SURVIVAL:   " + OOZ_SURVIVAL);
+        catn("  NURSE_MORT:     " + NURSE_MORTALITY);
+        catn("  MU:             " + MU);
+        catn("  Final pi:       " + format("%.6f", pi));
+        catn("  Window mean:    " + format("%.6f", windowMean));
+        catn("  Target pi:      " + TARGET_PI);
+        catn("  Ratio:          " + format("%.4f", windowMean / TARGET_PI));
+        catn("  STATUS:         DID_NOT_CONVERGE");
+        catn("================================================");
+        community.simulationFinished();
+        return;
+    }
+}
