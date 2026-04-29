@@ -12,13 +12,13 @@ SLiM forward simulations for *Dolioletta gegenbauri* mitogenome population genet
 
 ## Repository structure
 
-\`\`\`
+```
 doliolid-slim-rebuild/
 ├── scripts/
 │   ├── slim/       # SLiM simulation scripts
 │   └── bash/       # SLURM job submission wrappers
 └── params/         # Parameter files
-\`\`\`
+```
 
 ## Software
 
