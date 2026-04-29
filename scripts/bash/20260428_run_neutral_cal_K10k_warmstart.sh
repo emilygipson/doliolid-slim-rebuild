@@ -57,7 +57,7 @@ GENOME_LENGTH=15135
 # Warm-start MU per combo (overrides default TARGET_PI / K_NURSES formula)
 case $COMBO_ID in
     3) MU=2.176e-07 ;;
-    5) MU=1.588e-07 ;;
+    5) MU=3.46e-07 ;;
     9) MU=2.144e-07 ;;
     *) echo "ERROR: warm-start MU not defined for combo $COMBO_ID"; exit 1 ;;
 esac
