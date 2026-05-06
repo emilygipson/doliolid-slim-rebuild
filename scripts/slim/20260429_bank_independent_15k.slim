@@ -1,0 +1,119 @@
+// Build one haplotype bank entry. Independent run, no snapshot pooling.
+// Required -d flags (all): K_NURSES, MU, OOZ_SURVIVAL, NURSE_MORTALITY,
+// COMBO_ID, BANK_RUN_ID, GENOME_LENGTH, PHOROS_PER_NURSE, GONOS_PER_PHORO,
+// EGGS_PER_GONO, SELFING_RATE, BANK_END_TICK, BANKDIR.
+
+initialize() {
+    initializeSLiMModelType("nonWF");
+
+    if (!exists("K_NURSES")) stop("K_NURSES required");
+    if (!exists("MU")) stop("MU required");
+    if (!exists("OOZ_SURVIVAL")) stop("OOZ_SURVIVAL required");
+    if (!exists("NURSE_MORTALITY")) stop("NURSE_MORTALITY required");
+    if (!exists("COMBO_ID")) stop("COMBO_ID required");
+    if (!exists("BANK_RUN_ID")) stop("BANK_RUN_ID required");
+    if (!exists("GENOME_LENGTH")) stop("GENOME_LENGTH required");
+    if (!exists("PHOROS_PER_NURSE")) stop("PHOROS_PER_NURSE required");
+    if (!exists("GONOS_PER_PHORO")) stop("GONOS_PER_PHORO required");
+    if (!exists("EGGS_PER_GONO")) stop("EGGS_PER_GONO required");
+    if (!exists("SELFING_RATE")) stop("SELFING_RATE required");
+    if (!exists("BANK_END_TICK")) stop("BANK_END_TICK required");
+    if (!exists("BANKDIR")) stop("BANKDIR required");
+
+    initializeMutationType("m1", 0.5, "f", 0.0);
+    m1.mutationStackPolicy = "l";
+    m1.convertToSubstitution = F;
+    initializeGenomicElementType("g1", m1, 1.0);
+    initializeChromosome(1, GENOME_LENGTH, type="H");
+    initializeGenomicElement(g1);
+    initializeMutationRate(MU);
+    initializeRecombinationRate(0.0);
+
+    defineConstant("BANKFILE", BANKDIR + "/bank_combo" + COMBO_ID + ".tsv");
+
+    catn("combo " + COMBO_ID + " run " + BANK_RUN_ID +
+        ": K=" + K_NURSES + " mu=" + MU + " end=" + BANK_END_TICK);
+}
+
+reproduction() {
+    if (individual.tag == 1) {
+        for (i in seqLen(PHOROS_PER_NURSE)) {
+            o = subpop.addCloned(individual);
+            if (!isNULL(o)) o.tag = 2;
+        }
+    }
+    if (individual.tag == 2) {
+        for (i in seqLen(GONOS_PER_PHORO)) {
+            o = subpop.addCloned(individual);
+            if (!isNULL(o)) o.tag = 3;
+        }
+    }
+    if (individual.tag == 3) {
+        mom = individual.haplosomesNonNull;
+        for (i in seqLen(EGGS_PER_GONO)) {
+            o = subpop.addRecombinant(mom, NULL, integer(0), NULL, NULL, NULL);
+            if (!isNULL(o)) o.tag = 0;
+        }
+    }
+}
+
+1 early() {
+    sim.addSubpop("p1", asInteger(K_NURSES / 10));
+    p1.individuals.tag = 1;
+}
+
+early() {
+    if (community.tick == 1) return;
+    inds = p1.individuals;
+    if (size(inds) == 0) {
+        catn("extinct at tick " + community.tick);
+        community.simulationFinished();
+        return;
+    }
+
+    ooz = inds[(inds.tag == 0) & (inds.age >= 1)];
+    if (size(ooz) > 0) {
+        nurses = p1.individuals[p1.individuals.tag == 1];
+        slots = K_NURSES - size(nurses);
+        ooz = sample(ooz, size(ooz));
+        matured = 0;
+        for (o in ooz) {
+            if (runif(1) < OOZ_SURVIVAL & matured < slots) {
+                o.tag = 1;
+                matured = matured + 1;
+            } else {
+                o.fitnessScaling = 0.0;
+            }
+        }
+    }
+
+    nurses = p1.individuals[p1.individuals.tag == 1];
+    if (size(nurses) > 0) {
+        nKill = asInteger(max(1.0, ceil(size(nurses) * NURSE_MORTALITY)));
+        if (nKill > size(nurses)) nKill = size(nurses);
+        sample(nurses, nKill).fitnessScaling = 0.0;
+    }
+
+    oldP = p1.individuals[(p1.individuals.tag == 2) & (p1.individuals.age >= 1)];
+    if (size(oldP) > 0) oldP.fitnessScaling = 0.0;
+
+    oldG = p1.individuals[(p1.individuals.tag == 3) & (p1.individuals.age >= 1)];
+    if (size(oldG) > 0) oldG.fitnessScaling = 0.0;
+}
+
+BANK_END_TICK late() {
+    nurses = p1.individuals[p1.individuals.tag == 1];
+    if (size(nurses) < 1) {
+        catn("no nurses at tick " + community.tick);
+        community.simulationFinished();
+        return;
+    }
+
+    h = sample(nurses, 1).haplosomesNonNull[0];
+    m = h.mutations;
+    pos = (size(m) > 0) ? paste(sort(m.position), sep=" ") else "";
+
+    writeFile(BANKFILE, BANK_RUN_ID + "\t" + pos  , append=T);
+    catn("wrote bank entry " + BANK_RUN_ID + ", " + size(m) + " mutations");
+    community.simulationFinished();
+}
