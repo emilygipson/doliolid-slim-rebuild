@@ -23,10 +23,6 @@
 #   COMBO_ID = ((T-1) %% 75) + 1
 #   RUN_ID   = ((T-1) /  75) + 1
 #
-# Run-major chosen so partial completion gives uniform N across all 75 combos
-# rather than full data on some cells and none on others.
-#
-# Mail-type is FAIL only because END on 9750 tasks would generate 9750 emails.
 
 set -e
 
@@ -50,10 +46,6 @@ fi
 COMBO_ID=$(( (T - 1) % 75 + 1 ))
 RUN_ID=$(( (T - 1) / 75 + 1 ))
 
-if [ "$COMBO_ID" -lt 1 ] || [ "$COMBO_ID" -gt 75 ]; then
-    echo "ERROR: invalid COMBO_ID=$COMBO_ID from global task $T"
-    exit 1
-fi
 
 cd $REBUILD
 source /apps/eb/Miniforge3/24.11.3-0/etc/profile.d/conda.sh
