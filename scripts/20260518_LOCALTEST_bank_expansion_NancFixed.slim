@@ -1,0 +1,172 @@
+// 20260518_LOCALTEST_bank_expansion_NancFixed.slim
+//
+// LOCAL TEST RUN. Not a production script. Output should not be used
+// in analysis.
+//
+// Short-timescale variant of 20260516_bank_expansion_NancFixed_15k.slim
+// for SLiMgui validation. The 4-hour scavenge smoke (job 45352454)
+// timed out before reaching the expansion epoch, so this script
+// validates the founder-seeding change and the instantaneous-expansion
+// mechanic locally instead.
+//
+// Differences from the production script:
+//   - All -d parameters hardcoded at the top of initialize()
+//   - T_EXPANSION shortened: 30000 -> 1000
+//   - BANK_END_TICK shortened: 60000 -> 2000
+//   - Output filename prefixed "LOCALTEST_"
+//   - Per-100-tick progress print added in early()
+//
+// Status: ran to completion in SLiMgui on 2026-05-18. Wrote one bank
+// row with 3 mutations at positions 1247, 1722, 14801. Founder seeding
+// and expansion mechanic confirmed functional at short timescale.
+// Full-scale cluster validation still pending (blocked on pursel QOS).
+//
+// Parameter values used: combo 26, factor=10 (smallest non-trivial
+// expansion). Lifecycle params: OOZ_SURVIVAL=0.25, NURSE_MORTALITY=0.05.
+// PHOROS_PER_NURSE, GONOS_PER_PHORO, EGGS_PER_GONO set to 4 each as
+// placeholders; verify against params/20260429_lifecycle_grid_100.tsv
+// row for combo 26 before re-running.
+
+initialize() {
+    initializeSLiMModelType("nonWF");
+
+    // Hardcoded local-test parameters
+    defineConstant("N_ANC", 500);
+    defineConstant("N_FINAL", 5000);
+    defineConstant("T_EXPANSION", 1000);
+    defineConstant("BANK_END_TICK", 2000);
+    defineConstant("FACTOR_IDX", 1);
+    defineConstant("MU", 2.6192e-07);
+    defineConstant("OOZ_SURVIVAL", 0.25);
+    defineConstant("NURSE_MORTALITY", 0.05);
+    defineConstant("COMBO_ID", 26);
+    defineConstant("BANK_RUN_ID", 1);
+    defineConstant("GENOME_LENGTH", 15135);
+    defineConstant("PHOROS_PER_NURSE", 4);
+    defineConstant("GONOS_PER_PHORO", 4);
+    defineConstant("EGGS_PER_GONO", 4);
+    defineConstant("SELFING_RATE", 0.0);
+    defineConstant("BANKDIR", "C:/Users/emily/Downloads");
+
+    // Guards (identical to production)
+    if (T_EXPANSION <= 1) stop("T_EXPANSION must be > 1");
+    if (T_EXPANSION >= BANK_END_TICK) stop("T_EXPANSION must be < BANK_END_TICK");
+    if (N_ANC < 1) stop("N_ANC must be >= 1");
+    if (N_FINAL < N_ANC) stop("N_FINAL must be >= N_ANC");
+
+    // Genomic setup (identical to production)
+    initializeMutationType("m1", 0.5, "f", 0.0);
+    m1.mutationStackPolicy = "l";
+    m1.convertToSubstitution = F;
+    initializeGenomicElementType("g1", m1, 1.0);
+    initializeChromosome(1, GENOME_LENGTH, type="H");
+    initializeGenomicElement(g1);
+    initializeMutationRate(MU);
+    initializeRecombinationRate(0.0);
+
+    defineConstant("BANKFILE", BANKDIR + "/LOCALTEST_bank_expansion_NancFixed_combo" + COMBO_ID +
+        "_factor" + FACTOR_IDX + ".tsv");
+
+    catn("LOCAL TEST RUN. Output not for analysis.");
+    catn("combo " + COMBO_ID + " run " + BANK_RUN_ID +
+        ": N_anc=" + N_ANC + " N_final=" + N_FINAL +
+        " factor_idx=" + FACTOR_IDX +
+        " T_exp=" + T_EXPANSION + " end=" + BANK_END_TICK +
+        " mu=" + MU);
+    catn("BANKFILE = " + BANKFILE);
+}
+
+reproduction() {
+    if (individual.tag == 1) {
+        for (i in seqLen(PHOROS_PER_NURSE)) {
+            o = subpop.addCloned(individual);
+            if (!isNULL(o)) o.tag = 2;
+        }
+    }
+    if (individual.tag == 2) {
+        for (i in seqLen(GONOS_PER_PHORO)) {
+            o = subpop.addCloned(individual);
+            if (!isNULL(o)) o.tag = 3;
+        }
+    }
+    if (individual.tag == 3) {
+        mom = individual.haplosomesNonNull;
+        for (i in seqLen(EGGS_PER_GONO)) {
+            o = subpop.addRecombinant(mom, NULL, integer(0), NULL, NULL, NULL);
+            if (!isNULL(o)) o.tag = 0;
+        }
+    }
+}
+
+1 early() {
+    sim.addSubpop("p1", max(1, asInteger(N_ANC)));
+    p1.individuals.tag = 1;
+    catn("tick 1: seeded p1 with " + p1.individualCount + " founders (all nurses)");
+}
+
+early() {
+    if (community.tick == 1) return;
+
+    K_active = (community.tick < T_EXPANSION) ? N_ANC else N_FINAL;
+
+    inds = p1.individuals;
+    if (size(inds) == 0) {
+        catn("extinct at tick " + community.tick);
+        community.simulationFinished();
+        return;
+    }
+
+    ooz = inds[(inds.tag == 0) & (inds.age >= 1)];
+    if (size(ooz) > 0) {
+        nurses = p1.individuals[p1.individuals.tag == 1];
+        slots = K_active - size(nurses);
+        ooz = sample(ooz, size(ooz));
+        matured = 0;
+        for (o in ooz) {
+            if (runif(1) < OOZ_SURVIVAL & matured < slots) {
+                o.tag = 1;
+                matured = matured + 1;
+            } else {
+                o.fitnessScaling = 0.0;
+            }
+        }
+    }
+
+    nurses = p1.individuals[p1.individuals.tag == 1];
+    if (size(nurses) > 0) {
+        nKill = asInteger(max(1.0, ceil(size(nurses) * NURSE_MORTALITY)));
+        if (nKill > size(nurses)) nKill = size(nurses);
+        sample(nurses, nKill).fitnessScaling = 0.0;
+    }
+
+    oldP = p1.individuals[(p1.individuals.tag == 2) & (p1.individuals.age >= 1)];
+    if (size(oldP) > 0) oldP.fitnessScaling = 0.0;
+
+    oldG = p1.individuals[(p1.individuals.tag == 3) & (p1.individuals.age >= 1)];
+    if (size(oldG) > 0) oldG.fitnessScaling = 0.0;
+
+    // Progress print (local-test only)
+    if ((community.tick % 100 == 0) | (community.tick == T_EXPANSION - 1) | (community.tick == T_EXPANSION) | (community.tick == T_EXPANSION + 1)) {
+        nurses_now = size(p1.individuals[p1.individuals.tag == 1]);
+        catn("tick " + community.tick + ": N=" + p1.individualCount +
+            " nurses=" + nurses_now + " K_active=" + K_active);
+    }
+}
+
+BANK_END_TICK late() {
+    nurses = p1.individuals[p1.individuals.tag == 1];
+    if (size(nurses) < 1) {
+        catn("no nurses at tick " + community.tick);
+        community.simulationFinished();
+        return;
+    }
+
+    h = sample(nurses, 1).haplosomesNonNull[0];
+    m = h.mutations;
+    pos = (size(m) > 0) ? paste(sort(m.position), sep=" ") else "";
+
+    writeFile(BANKFILE, BANK_RUN_ID + "\t" + pos, append=T);
+    catn("wrote bank entry " + BANK_RUN_ID + ", " + size(m) + " mutations");
+    catn("LOCAL TEST COMPLETE. Output at " + BANKFILE);
+    community.simulationFinished();
+}
