@@ -1,0 +1,170 @@
+// 20260516_bank_expansion_NancFixed_15k.slim
+//
+// Build one demographic-expansion haplotype bank entry. Independent run.
+// Adapted from 20260509_bank_expansion_15k.slim (which varied N_anc with
+// N_final fixed). This variant FIXES N_anc and varies N_final via the
+// expansion factor, decoupling the expansion test from the bottleneck-
+// signal confound that the prior design had at extreme factors.
+//
+// Design (2026-05-16):
+//   - Instantaneous expansion at T_EXPANSION from N_ANC to N_FINAL
+//   - N_ANC is fixed (passed in via -d; default-target 500)
+//   - N_FINAL = N_ANC * EXPANSION_FACTOR (computed by wrapper)
+//   - Factors per design: {10, 20, 40, 70, 100}
+//
+// FOUNDER SEEDING (changed from prior version):
+//   Prior expansion script seeded p1 with K_ANC/10 individuals and let the
+//   lifecycle ramp up to K_active. That convention came from the neutral
+//   campaign script and imposed a brief warm-up bottleneck before the
+//   pre-expansion plateau. This version seeds p1 with N_ANC individuals
+//   directly so that "N_anc = 500" means 500 founders, not 50 ramping to
+//   500. Documented here so the change vs. 20260509_bank_expansion_15k.slim
+//   is explicit.
+//
+// Mu values reused from the K=25000 steady-state calibration. Absolute
+// diversity will be off-target across cells but Tajima's D as a shape
+// statistic remains interpretable.
+//
+// Lifecycle params (OOZ_SURVIVAL, NURSE_MORTALITY, etc.) come from the
+// lifecycle TSV per combo. The K column of the lifecycle TSV is IGNORED
+// in this design; carrying capacity is set by N_ANC / N_FINAL passed in
+// via -d.
+//
+// Required -d flags: N_ANC, N_FINAL, T_EXPANSION, FACTOR_IDX, MU,
+// OOZ_SURVIVAL, NURSE_MORTALITY, COMBO_ID, BANK_RUN_ID, GENOME_LENGTH,
+// PHOROS_PER_NURSE, GONOS_PER_PHORO, EGGS_PER_GONO, SELFING_RATE,
+// BANK_END_TICK, BANKDIR.
+
+initialize() {
+    initializeSLiMModelType("nonWF");
+
+    if (!exists("N_ANC")) stop("N_ANC required");
+    if (!exists("N_FINAL")) stop("N_FINAL required");
+    if (!exists("T_EXPANSION")) stop("T_EXPANSION required");
+    if (!exists("FACTOR_IDX")) stop("FACTOR_IDX required");
+    if (!exists("MU")) stop("MU required");
+    if (!exists("OOZ_SURVIVAL")) stop("OOZ_SURVIVAL required");
+    if (!exists("NURSE_MORTALITY")) stop("NURSE_MORTALITY required");
+    if (!exists("COMBO_ID")) stop("COMBO_ID required");
+    if (!exists("BANK_RUN_ID")) stop("BANK_RUN_ID required");
+    if (!exists("GENOME_LENGTH")) stop("GENOME_LENGTH required");
+    if (!exists("PHOROS_PER_NURSE")) stop("PHOROS_PER_NURSE required");
+    if (!exists("GONOS_PER_PHORO")) stop("GONOS_PER_PHORO required");
+    if (!exists("EGGS_PER_GONO")) stop("EGGS_PER_GONO required");
+    if (!exists("SELFING_RATE")) stop("SELFING_RATE required");
+    if (!exists("BANK_END_TICK")) stop("BANK_END_TICK required");
+    if (!exists("BANKDIR")) stop("BANKDIR required");
+
+    if (T_EXPANSION <= 1) stop("T_EXPANSION must be > 1");
+    if (T_EXPANSION >= BANK_END_TICK) stop("T_EXPANSION must be < BANK_END_TICK");
+    if (N_ANC < 1) stop("N_ANC must be >= 1");
+    if (N_FINAL < N_ANC) stop("N_FINAL must be >= N_ANC");
+
+    initializeMutationType("m1", 0.5, "f", 0.0);
+    m1.mutationStackPolicy = "l";
+    m1.convertToSubstitution = F;
+    initializeGenomicElementType("g1", m1, 1.0);
+    initializeChromosome(1, GENOME_LENGTH, type="H");
+    initializeGenomicElement(g1);
+    initializeMutationRate(MU);
+    initializeRecombinationRate(0.0);
+
+    defineConstant("BANKFILE", BANKDIR + "/bank_expansion_NancFixed_combo" + COMBO_ID +
+        "_factor" + FACTOR_IDX + ".tsv");
+
+    catn("combo " + COMBO_ID + " run " + BANK_RUN_ID +
+        ": N_anc=" + N_ANC + " N_final=" + N_FINAL +
+        " factor_idx=" + FACTOR_IDX +
+        " T_exp=" + T_EXPANSION + " end=" + BANK_END_TICK +
+        " mu=" + MU);
+}
+
+reproduction() {
+    if (individual.tag == 1) {
+        for (i in seqLen(PHOROS_PER_NURSE)) {
+            o = subpop.addCloned(individual);
+            if (!isNULL(o)) o.tag = 2;
+        }
+    }
+    if (individual.tag == 2) {
+        for (i in seqLen(GONOS_PER_PHORO)) {
+            o = subpop.addCloned(individual);
+            if (!isNULL(o)) o.tag = 3;
+        }
+    }
+    if (individual.tag == 3) {
+        mom = individual.haplosomesNonNull;
+        for (i in seqLen(EGGS_PER_GONO)) {
+            o = subpop.addRecombinant(mom, NULL, integer(0), NULL, NULL, NULL);
+            if (!isNULL(o)) o.tag = 0;
+        }
+    }
+}
+
+1 early() {
+    // Seed with N_ANC founders directly. "N_anc = 500" means 500 nurses
+    // at tick 1, not 50 ramping to 500. See header note on the change
+    // from the prior /10 convention.
+    sim.addSubpop("p1", max(1, asInteger(N_ANC)));
+    p1.individuals.tag = 1;
+}
+
+early() {
+    if (community.tick == 1) return;
+
+    // Active carrying capacity: ancestral until T_EXPANSION, then final.
+    K_active = (community.tick < T_EXPANSION) ? N_ANC else N_FINAL;
+
+    inds = p1.individuals;
+    if (size(inds) == 0) {
+        catn("extinct at tick " + community.tick);
+        community.simulationFinished();
+        return;
+    }
+
+    ooz = inds[(inds.tag == 0) & (inds.age >= 1)];
+    if (size(ooz) > 0) {
+        nurses = p1.individuals[p1.individuals.tag == 1];
+        slots = K_active - size(nurses);
+        ooz = sample(ooz, size(ooz));
+        matured = 0;
+        for (o in ooz) {
+            if (runif(1) < OOZ_SURVIVAL & matured < slots) {
+                o.tag = 1;
+                matured = matured + 1;
+            } else {
+                o.fitnessScaling = 0.0;
+            }
+        }
+    }
+
+    nurses = p1.individuals[p1.individuals.tag == 1];
+    if (size(nurses) > 0) {
+        nKill = asInteger(max(1.0, ceil(size(nurses) * NURSE_MORTALITY)));
+        if (nKill > size(nurses)) nKill = size(nurses);
+        sample(nurses, nKill).fitnessScaling = 0.0;
+    }
+
+    oldP = p1.individuals[(p1.individuals.tag == 2) & (p1.individuals.age >= 1)];
+    if (size(oldP) > 0) oldP.fitnessScaling = 0.0;
+
+    oldG = p1.individuals[(p1.individuals.tag == 3) & (p1.individuals.age >= 1)];
+    if (size(oldG) > 0) oldG.fitnessScaling = 0.0;
+}
+
+BANK_END_TICK late() {
+    nurses = p1.individuals[p1.individuals.tag == 1];
+    if (size(nurses) < 1) {
+        catn("no nurses at tick " + community.tick);
+        community.simulationFinished();
+        return;
+    }
+
+    h = sample(nurses, 1).haplosomesNonNull[0];
+    m = h.mutations;
+    pos = (size(m) > 0) ? paste(sort(m.position), sep=" ") else "";
+
+    writeFile(BANKFILE, BANK_RUN_ID + "\t" + pos, append=T);
+    catn("wrote bank entry " + BANK_RUN_ID + ", " + size(m) + " mutations");
+    community.simulationFinished();
+}
